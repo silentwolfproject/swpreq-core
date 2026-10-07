@@ -1,0 +1,186 @@
+name: Build Multi-Platform
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            name: windows-x86
+            lib_name: swpreq.dll
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            name: windows-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-arm64
+            cross: true
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            name: linux-armv7
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macos-arm64
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            name: android-arm64
+            android: true
+            ndk-target: aarch64-linux-android
+            ndk-linker: aarch64-linux-android21-clang
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            name: android-armv7
+            android: true
+            ndk-target: armv7a-linux-androideabi
+            ndk-linker: armv7a-linux-androideabi21-clang
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            name: android-x64
+            android: true
+            ndk-target: x86_64-linux-android
+            ndk-linker: x86_64-linux-android21-clang
+          - target: i686-linux-android
+            os: ubuntu-latest
+            name: android-x86
+            android: true
+            ndk-target: i686-linux-android
+            ndk-linker: i686-linux-android21-clang
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Setup Android NDK
+        if: matrix.android
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Configure Android linker
+        if: matrix.android
+        shell: bash
+        run: |
+          NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$TOOLCHAIN" >> $GITHUB_PATH
+
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
+              echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
+              ;;
+            armv7-linux-androideabi)
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$TOOLCHAIN/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "CC_armv7_linux_androideabi=$TOOLCHAIN/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
+              echo "AR_armv7_linux_androideabi=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
+              ;;
+            x86_64-linux-android)
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$TOOLCHAIN/x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_x86_64_linux_android=$TOOLCHAIN/x86_64-linux-android21-clang" >> $GITHUB_ENV
+              echo "AR_x86_64_linux_android=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
+              ;;
+            i686-linux-android)
+              echo "CARGO_TARGET_I686_LINUX_ANDROID_LINKER=$TOOLCHAIN/i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "CC_i686_linux_android=$TOOLCHAIN/i686-linux-android21-clang" >> $GITHUB_ENV
+              echo "AR_i686_linux_android=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross && !matrix.android }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (android)
+        if: matrix.android
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          find target/${{ matrix.target }}/release -maxdepth 1 \
+            \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" -o -name "*.a" \) \
+            -exec cp {} dist/ \; 2>/dev/null || true
+          ls -la dist/ || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/
+          retention-days: 90
+          if-no-files-found: warn
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release
+        shell: bash
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            mkdir -p "release/$name"
+            cp -r "$dir"* "release/$name/" 2>/dev/null || true
+          done
+          echo "=== Release structure ==="
+          find release -type f | sort
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/**/*
+          generate_release_notes: true
