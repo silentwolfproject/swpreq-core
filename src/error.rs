@@ -34,9 +34,11 @@ pub enum SwpreqError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("auth error: {0}")]
+    Auth(String),
+
     #[error("internal error: {0}")]
     Internal(String),
-
 }
 
 pub type Result<T> = std::result::Result<T, SwpreqError>;
@@ -54,6 +56,7 @@ impl SwpreqError {
             Self::Io(_) => 8,
             Self::InvalidArgument(_) => 9,
             Self::NotFound(_) => 10,
+            Self::Auth(_) => 11,
             Self::Internal(_) => 99,
         }
     }
@@ -69,5 +72,10 @@ pub fn from_c_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    unsafe { std::ffi::CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string()) }
+    unsafe {
+        std::ffi::CStr::from_ptr(ptr)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
+    }
 }

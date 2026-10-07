@@ -1,12 +1,16 @@
+use crate::auth_digest::DigestAuth;
+use crate::connector::TCPConnector;
 use crate::cookie::CookieJar;
 use crate::error::{Result, SwpreqError};
 use crate::request::RequestBuilder;
+use crate::trace::TraceConfig;
 use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -46,8 +50,11 @@ pub struct Client {
     pub redirect_pool: Arc<RwLock<HashMap<usize, Arc<reqwest::Client>>>>,
     pub hooks: Arc<RwLock<crate::hooks::Hooks>>,
     pub adapters: Arc<RwLock<crate::adapter::AdapterRegistry>>,
-    pub netrc: Option<crate::netrc::Netrc>,
     pub retry_policy: crate::retry::RetryPolicy,
+    pub netrc: Option<crate::netrc::Netrc>,
+    pub connector: Option<Arc<TCPConnector>>,
+    pub trace_config: Option<Arc<TraceConfig>>,
+    pub digest_auth: Option<Arc<AsyncMutex<DigestAuth>>>,
 }
 
 impl Client {
@@ -64,8 +71,11 @@ impl Client {
             redirect_pool: Arc::new(RwLock::new(HashMap::new())),
             hooks: Arc::new(RwLock::new(crate::hooks::Hooks::new())),
             adapters: Arc::new(RwLock::new(crate::adapter::AdapterRegistry::new())),
-            netrc,
             retry_policy: crate::retry::RetryPolicy::default(),
+            netrc,
+            connector: None,
+            trace_config: None,
+            digest_auth: None,
         })
     }
 
@@ -245,6 +255,19 @@ impl Client {
             .and_then(|n| n.lookup(host))
             .map(|e| (e.login.clone(), e.password.clone()))
     }
+
+        pub fn set_connector(&mut self, connector: TCPConnector) {
+        self.connector = Some(Arc::new(connector));
+    }
+
+    pub fn set_trace_config(&mut self, config: TraceConfig) {
+        self.trace_config = Some(Arc::new(config));
+    }
+
+    pub fn set_digest_auth(&mut self, auth: DigestAuth) {
+        self.digest_auth = Some(Arc::new(AsyncMutex::new(auth)));
+    }
+
 }
 
 impl Clone for Client {
@@ -258,8 +281,11 @@ impl Clone for Client {
             redirect_pool: self.redirect_pool.clone(),
             hooks: self.hooks.clone(),
             adapters: self.adapters.clone(),
-            netrc: self.netrc.clone(),
             retry_policy: self.retry_policy.clone(),
+            netrc: self.netrc.clone(),
+            connector: self.connector.clone(),
+            trace_config: self.trace_config.clone(),
+            digest_auth: self.digest_auth.clone(),
         }
     }
 }

@@ -2,12 +2,9 @@ use crate::error::{Result, SwpreqError};
 
 pub fn proxy_from_env() -> Option<String> {
     let keys = [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
+        "HTTPS_PROXY", "https_proxy",
+        "HTTP_PROXY", "http_proxy",
+        "ALL_PROXY", "all_proxy",
     ];
 
     for key in &keys {
@@ -82,7 +79,11 @@ pub fn resolve_proxy(explicit: Option<&str>, url: &str) -> Result<Option<String>
 }
 
 pub fn validate_proxy(proxy: &str) -> Result<()> {
-    let valid_schemes = ["http://", "https://", "socks4://", "socks5://", "socks5h://"];
+    let valid_schemes = [
+        "http://", "https://",
+        "socks4://", "socks4a://",
+        "socks5://", "socks5h://",
+    ];
 
     if !valid_schemes.iter().any(|s| proxy.starts_with(s)) {
         return Err(SwpreqError::Proxy(format!(

@@ -6,6 +6,12 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 use std::time::Duration;
+use crate::auth_digest::DigestAuth;
+use crate::connector::{SocketFamily, TCPConnector};
+use crate::resolver::AsyncResolver;
+use crate::server::Server;
+use crate::stream_body::StreamBody;
+use crate::trace::TraceConfig;
 
 pub const SWPREQ_OK: c_int = 0;
 pub const SWPREQ_ERR_INVALID_ARG: c_int = 1;
@@ -37,6 +43,247 @@ pub struct SwpreqResponseCallback {
     pub on_error: extern "C" fn(*mut c_void, c_int, *const c_char),
 }
 
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_digest_auth_new(
+    username: *const c_char,
+    password: *const c_char,
+) -> *mut c_void {
+    let username = from_c_string(username).unwrap_or_default();
+    let password = from_c_string(password).unwrap_or_default();
+
+    let auth = DigestAuth::new(&username, &password);
+    Box::into_raw(Box::new(auth)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_digest_auth_from_challenge(
+    username: *const c_char,
+    password: *const c_char,
+    challenge: *const c_char,
+) -> *mut c_void {
+    let username = from_c_string(username).unwrap_or_default();
+    let password = from_c_string(password).unwrap_or_default();
+    let challenge = from_c_string(challenge).unwrap_or_default();
+
+    match DigestAuth::from_challenge(&username, &password, &challenge) {
+        Ok(auth) => Box::into_raw(Box::new(auth)) as *mut c_void,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_digest_auth_header(
+    auth: *mut c_void,
+    method: *const c_char,
+    uri: *const c_char,
+) -> *mut c_char {
+    if auth.is_null() {
+        return to_c_string(String::new());
+    }
+
+    let auth = unsafe { &mut *(auth as *mut DigestAuth) };
+    let method = from_c_string(method).unwrap_or_default();
+    let uri = from_c_string(uri).unwrap_or_default();
+
+    match auth.build_header(&method, &uri) {
+        Ok(header) => to_c_string(header),
+        Err(_) => to_c_string(String::new()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_digest_auth_free(auth: *mut c_void) {
+    if !auth.is_null() {
+        unsafe {
+            let _ = Box::from_raw(auth as *mut DigestAuth);
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_tcp_connector_new(config_json: *const c_char) -> *mut c_void {
+    let config_str = from_c_string(config_json).unwrap_or_default();
+    let config: serde_json::Value =
+        serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
+
+    let mut connector = TCPConnector::new();
+
+    if let Some(v) = config.get("limit").and_then(|v| v.as_u64()) {
+        connector.limit = v as usize;
+    }
+    if let Some(v) = config.get("limit_per_host").and_then(|v| v.as_u64()) {
+        connector.limit_per_host = v as usize;
+    }
+    if let Some(v) = config.get("ttl_dns_cache").and_then(|v| v.as_u64()) {
+        connector.ttl_dns_cache = Duration::from_secs(v);
+    }
+    if let Some(v) = config.get("force_close").and_then(|v| v.as_bool()) {
+        connector.force_close = v;
+    }
+    if let Some(v) = config.get("keepalive_timeout").and_then(|v| v.as_f64()) {
+        connector.keepalive_timeout = Duration::from_secs_f64(v);
+    }
+    if let Some(v) = config.get("ssl_verify").and_then(|v| v.as_bool()) {
+        connector.ssl_verify = v;
+    }
+    if let Some(v) = config.get("family").and_then(|v| v.as_str()) {
+        connector.family = match v {
+            "ipv4" => SocketFamily::IPv4,
+            "ipv6" => SocketFamily::IPv6,
+            _ => SocketFamily::Any,
+        };
+    }
+
+    Box::into_raw(Box::new(connector)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_tcp_connector_free(connector: *mut c_void) {
+    if !connector.is_null() {
+        unsafe {
+            let _ = Box::from_raw(connector as *mut TCPConnector);
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_resolver_new(nameservers_json: *const c_char) -> *mut c_void {
+    let json_str = from_c_string(nameservers_json).unwrap_or_default();
+
+    let nameservers: Vec<String> = serde_json::from_str(&json_str).unwrap_or_else(|_| {
+        vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()]
+    });
+
+    let resolver = AsyncResolver::new(nameservers);
+    Box::into_raw(Box::new(resolver)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_resolver_free(resolver: *mut c_void) {
+    if !resolver.is_null() {
+        unsafe {
+            let _ = Box::from_raw(resolver as *mut AsyncResolver);
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_stream_body_from_file(path: *const c_char) -> *mut c_void {
+    let path = from_c_string(path).unwrap_or_default();
+
+    match StreamBody::from_file(&path) {
+        Ok(body) => Box::into_raw(Box::new(body)) as *mut c_void,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_stream_body_from_bytes(
+    data: *const u8,
+    data_len: usize,
+) -> *mut c_void {
+    if data.is_null() || data_len == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(data, data_len).to_vec() };
+    let body = StreamBody::from_bytes(bytes);
+
+    Box::into_raw(Box::new(body)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_stream_body_free(body: *mut c_void) {
+    if !body.is_null() {
+        unsafe {
+            let _ = Box::from_raw(body as *mut StreamBody);
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_trace_config_new() -> *mut c_void {
+    Box::into_raw(Box::new(TraceConfig::new())) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_trace_config_free(config: *mut c_void) {
+    if !config.is_null() {
+        unsafe {
+            let _ = Box::from_raw(config as *mut TraceConfig);
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_server_new(config_json: *const c_char) -> *mut c_void {
+    let config_str = from_c_string(config_json).unwrap_or_default();
+    let config: serde_json::Value =
+        serde_json::from_str(&config_str).unwrap_or(serde_json::json!({}));
+
+    let host = config
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0.0");
+    let port = config.get("port").and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
+
+    let server = Server::new(host, port);
+    Box::into_raw(Box::new(server)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_server_free(server: *mut c_void) {
+    if !server.is_null() {
+        unsafe {
+            let _ = Box::from_raw(server as *mut Server);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_server_run(server: *mut c_void, error_out: *mut *mut c_char) -> c_int {
+    if server.is_null() {
+        return SWPREQ_ERR_INVALID_ARG;
+    }
+
+    let server = unsafe { Box::from_raw(server as *mut Server) };
+    let rt = crate::runtime();
+
+    match rt.block_on(server.run()) {
+        Ok(_) => SWPREQ_OK,
+        Err(e) => {
+            if !error_out.is_null() {
+                unsafe {
+                    *error_out = to_c_string(e.to_string());
+                }
+            }
+            e.code()
+        }
+    }
+}
+
+
+#[no_mangle]
+pub extern "C" fn swpreq_signal_handler_new() -> *mut c_void {
+    let handler = crate::signals::SignalHandler::new();
+    Box::into_raw(Box::new(handler)) as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn swpreq_signal_handler_free(handler: *mut c_void) {
+    if !handler.is_null() {
+        unsafe {
+            let _ = Box::from_raw(handler as *mut crate::signals::SignalHandler);
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn swpreq_ws_connect(
